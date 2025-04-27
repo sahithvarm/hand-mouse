@@ -1,0 +1,130 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import pyautogui
+from ultralytics import YOLO
+
+# Load YOLO model
+model = YOLO('yolov8n.pt')  # using YOLOv8 nano for faster speed
+
+# Initialize video capture
+cap = cv2.VideoCapture(0)
+cap.set(3, 640)
+cap.set(4, 480)
+
+# Initialize Mediapipe hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.8, min_tracking_confidence=0.8)
+mp_draw = mp.solutions.drawing_utils
+
+# Screen size
+screen_width, screen_height = pyautogui.size()
+
+# Smoothing
+plocX, plocY = 0, 0
+clocX, clocY = 0, 0
+smoothening = 5
+
+# Clicking variables
+clicking = False
+right_clicking = False
+click_threshold = 0.02
+frame_stable = 0
+
+# Finger tip IDs
+tip_ids = [4, 8, 12, 16, 20]
+
+# Functions
+def distance(p1, p2):
+    return np.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2)
+
+# Main loop
+while True:
+    success, frame = cap.read()
+    frame = cv2.flip(frame, 1)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    frame_height, frame_width, _ = frame.shape
+
+    # YOLO Detection
+    results = model.predict(frame, verbose=False)[0]
+    for box in results.boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        cls = int(box.cls[0])
+        conf = box.conf[0]
+
+        label = f'{model.names[cls]} {conf:.2f}'
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(frame, label, (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+    # Hand Tracking
+    results_hands = hands.process(frame_rgb)
+
+    if results_hands.multi_hand_landmarks:
+        hand_list = results_hands.multi_hand_landmarks
+
+        for hand_landmarks in hand_list:
+            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+        # First hand - Mouse movement
+        if len(hand_list) >= 1:
+            hand1 = hand_list[0]
+            index_finger_tip = hand1.landmark[8]
+            x = int(index_finger_tip.x * frame_width)
+            y = int(index_finger_tip.y * frame_height)
+
+            # Map to screen
+            screen_x = np.interp(x, (100, frame_width - 100), (0, screen_width))
+            screen_y = np.interp(y, (100, frame_height - 100), (0, screen_height))
+
+            clocX = plocX + (screen_x - plocX) / smoothening
+            clocY = plocY + (screen_y - plocY) / smoothening
+
+            pyautogui.moveTo(clocX, clocY)
+            plocX, plocY = clocX, clocY
+
+        # Second hand - Left click with single finger (index) and Right click with pinch gesture
+        if len(hand_list) >= 2:
+            hand2 = hand_list[1]
+            thumb_tip = hand2.landmark[4]  # Thumb tip
+            index_tip = hand2.landmark[8]  # Index finger tip
+
+            # Distance between thumb and index finger (to detect pinch gesture for right-click)
+            pinch_dist = distance(thumb_tip, index_tip)
+
+            # Right-click when pinch distance is small
+            if pinch_dist < click_threshold:
+                frame_stable += 1
+                if frame_stable > 2 and not right_clicking:
+                    pyautogui.mouseDown(button='right')  # Right-click
+                    right_clicking = True
+            else:
+                frame_stable = 0
+                if right_clicking:
+                    pyautogui.mouseUp(button='right')
+                    right_clicking = False
+
+            # Left-click with index finger (single finger click)
+            if not right_clicking:
+                dist_single_finger = distance(hand2.landmark[4], hand2.landmark[8])  # Thumb to index finger
+
+                if dist_single_finger < click_threshold:
+                    frame_stable += 1
+                    if frame_stable > 2 and not clicking:
+                        pyautogui.mouseDown(button='left')  # Left-click
+                        clicking = True
+                else:
+                    frame_stable = 0
+                    if clicking:
+                        pyautogui.mouseUp(button='left')
+                        clicking = False
+
+    # Show frame
+    cv2.imshow("YOLO + Hand Control", frame)
+
+    # Exit
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
